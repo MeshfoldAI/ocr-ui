@@ -1,7 +1,17 @@
 import React, { useState, useEffect } from "react";
 import { FileText, Eye, Download } from "lucide-react";
 
-const API_BASE_URL = "/api/v1";
+const API_BASE_URL = "/ocr/v1";
+const API_KEY = "mysecret123";
+
+// Helper to get auth headers
+const getAuthHeaders = () => {
+  const token = localStorage.getItem('authToken');
+  return {
+    'Content-Type': 'application/json',
+    ...(token && { 'Authorization': `Bearer ${token}` }),
+  };
+};
 
 // Helper to convert base64 to Blob
 const base64ToBlob = (base64, mimeType) => {
@@ -237,7 +247,12 @@ const QaReviewView = () => {
 
   // Fetch documents list
   useEffect(() => {
-    fetch(`${API_BASE_URL}/documents`)
+    const token = localStorage.getItem('authToken');
+    fetch(`${API_BASE_URL}/documents`, {
+      headers: {
+        ...(token && { 'Authorization': `Bearer ${token}` }),
+      },
+    })
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data)) setDocuments(data);
@@ -257,7 +272,12 @@ const QaReviewView = () => {
     setHasChanges(false);
   
     try {
-      const previewRes = await fetch(`${API_BASE_URL}/documents/${doc.id}/preview`);
+      const token = localStorage.getItem('authToken');
+      const headers = {
+        ...(token && { 'Authorization': `Bearer ${token}` }),
+      };
+
+      const previewRes = await fetch(`${API_BASE_URL}/documents/${doc.id}/preview`, { headers });
       const previewData = await previewRes.json();
       if (previewData.success && previewData.data) {
         setDocumentPreview(previewData.data);
@@ -265,7 +285,7 @@ const QaReviewView = () => {
         setDocumentPreview(null);
       }
   
-      const ocrRes = await fetch(`${API_BASE_URL}/documents/${doc.id}/ocr`);
+      const ocrRes = await fetch(`${API_BASE_URL}/documents/${doc.id}/ocr`, { headers });
       const ocrJson = await ocrRes.json();
   
       let structured = {};
@@ -284,7 +304,7 @@ const QaReviewView = () => {
   
       setOcrData(structured);
   
-      const reviewRes = await fetch(`${API_BASE_URL}/qa-reviews/${doc.id}`);
+      const reviewRes = await fetch(`${API_BASE_URL}/qa-reviews/${doc.id}`, { headers });
       const reviewData = await reviewRes.json();
       
       if (Array.isArray(reviewData)) {
@@ -352,7 +372,7 @@ const QaReviewView = () => {
 
       const response = await fetch(`${API_BASE_URL}/qa-reviews`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(payload),
       });
 
@@ -390,7 +410,7 @@ const QaReviewView = () => {
     try {
       const response = await fetch(`${API_BASE_URL}/documents/${selectedDoc.id}/json`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(ocrData),
       });
 

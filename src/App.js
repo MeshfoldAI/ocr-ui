@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Upload, FileText, List, Eye, CheckCircle, Clock, XCircle, AlertCircle, Download, Trash2 } from 'lucide-react';
+import { Upload, FileText, List, Eye, CheckCircle, Clock, XCircle, AlertCircle, Download, Trash2, LogOut, User } from 'lucide-react';
 import QaReviewView from "./QaReviewView";
+import Login from "./Login";
 
 
-const API_BASE_URL = '/api/v1/documents';
+const API_BASE_URL = '/ocr/v1/documents';
 
 // Helper function to convert array date to readable format
 const formatDateTime = (dateArray) => {
@@ -43,6 +44,8 @@ const base64ToBlob = (base64, mimeType) => {
 };
 
 const OcrApp = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userInfo, setUserInfo] = useState(null);
   const [activeView, setActiveView] = useState('upload');
   const [documents, setDocuments] = useState([]);
   const [selectedDocument, setSelectedDocument] = useState(null);
@@ -53,10 +56,255 @@ const OcrApp = () => {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [uploadMode, setUploadMode] = useState('process');
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [tokenRefreshNotification, setTokenRefreshNotification] = useState(false);
+
+  // Check for existing authentication on mount
+  useEffect(() => {
+    const token = localStorage.getItem('authToken');
+    const tokenExpiry = localStorage.getItem('tokenExpiry');
+    const savedUserInfo = localStorage.getItem('userInfo');
+    
+    if (token) {
+      // Check if token has expired
+      if (tokenExpiry && Date.now() > parseInt(tokenExpiry)) {
+        console.log('Token has expired, logging out...');
+        handleLogout();
+        return;
+      }
+      
+      setIsAuthenticated(true);
+      if (savedUserInfo) {
+        try {
+          setUserInfo(JSON.parse(savedUserInfo));
+        } catch (e) {
+          console.error('Error parsing user info:', e);
+        }
+      }
+    }
+  }, []);
+
+  // Check token expiry and refresh proactively (every minute)
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const checkAndRefreshToken = async () => {
+      const tokenExpiry = localStorage.getItem('tokenExpiry');
+      
+      if (!tokenExpiry) return;
+      
+      const expiryTime = parseInt(tokenExpiry);
+      const now = Date.now();
+      const timeUntilExpiry = expiryTime - now;
+      
+      // If token has already expired
+      if (timeUntilExpiry <= 0) {
+        console.log('Token has expired, attempting refresh...');
+        const refreshed = await refreshAccessToken();
+        
+        if (!refreshed) {
+          alert('Your session has expired. Please login again.');
+          handleLogout();
+        }
+      }
+      // If token will expire in less than 2 minutes (120 seconds), proactively refresh
+      else if (timeUntilExpiry < 120000) {
+        console.log('Token expiring soon, proactively refreshing...');
+        await refreshAccessToken();
+      }
+    };
+
+    // Check immediately
+    checkAndRefreshToken();
+    
+    // Then check every minute
+    const interval = setInterval(checkAndRefreshToken, 60000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated]);
+
+  // Helper function to get auth headers
+  const getAuthHeaders = () => {
+    const token = localStorage.getItem('authToken');
+    return {
+      'Content-Type': 'application/json',
+      ...(token && { 'Authorization': `Bearer ${token}` }),
+    };
+  };
+
+  // Token refresh function
+  const refreshAccessToken = async () => {
+    const refreshToken = localStorage.getItem('refreshToken');
+    
+    if (!refreshToken) {
+      console.log('No refresh token available');
+      return false;
+    }
+
+    try {
+      console.log('Attempting to refresh access token...');
+      setTokenRefreshNotification(true);
+      
+      const response = await fetch('/auth/api/v1/auth/refresh', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ refreshToken }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        
+        if (data.accessToken) {
+          // Update tokens in localStorage
+          localStorage.setItem('authToken', data.accessToken);
+          
+          if (data.refreshToken) {
+            localStorage.setItem('refreshToken', data.refreshToken);
+          }
+          
+          if (data.expiresIn) {
+            const expiryTime = Date.now() + (data.expiresIn * 1000);
+            localStorage.setItem('tokenExpiry', expiryTime.toString());
+          }
+          
+          if (data.user) {
+            localStorage.setItem('userInfo', JSON.stringify(data.user));
+            setUserInfo(data.user);
+          }
+          
+          console.log('Access token refreshed successfully');
+          
+          // Hide notification after 2 seconds
+          setTimeout(() => setTokenRefreshNotification(false), 2000);
+          
+          return true;
+        }
+      } else {
+        console.error('Token refresh failed:', response.status);
+        setTokenRefreshNotification(false);
+        return false;
+      }
+    } catch (error) {
+      console.error('Error refreshing token:', error);
+      setTokenRefreshNotification(false);
+      return false;
+    }
+    
+    setTokenRefreshNotification(false);
+    return false;
+  };
+
+  // Helper function for authenticated fetch with automatic token refresh and logout on 401
+  const authenticatedFetch = async (url, options = {}) => {
+    const token = localStorage.getItem('authToken');
+    const headers = {
+      ...(token && { 'Authorization': `Bearer ${token}` }),
+      ...options.headers,
+    };
+
+    const response = await fetch(url, {
+      ...options,
+      headers,
+    });
+
+    // If unauthorized, try to refresh token and retry once
+    if (response.status === 401) {
+      console.log('Received 401, attempting token refresh...');
+      const refreshed = await refreshAccessToken();
+      
+      if (refreshed) {
+        // Retry the request with new token
+        const newToken = localStorage.getItem('authToken');
+        const newHeaders = {
+          ...(newToken && { 'Authorization': `Bearer ${newToken}` }),
+          ...options.headers,
+        };
+        
+        const retryResponse = await fetch(url, {
+          ...options,
+          headers: newHeaders,
+        });
+        
+        if (retryResponse.ok) {
+          return retryResponse;
+        }
+      }
+      
+      // If refresh failed or retry still unauthorized, log out
+      console.log('Token refresh failed or retry unsuccessful, logging out...');
+      alert('Your session has expired. Please login again.');
+      handleLogout();
+      throw new Error('Unauthorized - session expired');
+    }
+
+    return response;
+  };
+
+  // Login handler
+  const handleLoginSuccess = (data) => {
+    setIsAuthenticated(true);
+    if (data.user) {
+      setUserInfo(data.user);
+    }
+  };
+
+  // Logout handler
+  const handleLogout = async () => {
+    setIsLoggingOut(true);
+    const token = localStorage.getItem('authToken');
+    
+    // Call backend logout API if token exists
+    if (token) {
+      try {
+        await fetch('/auth/api/v1/auth/logout', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        });
+        console.log('Successfully logged out from server');
+      } catch (error) {
+        console.error('Error calling logout API:', error);
+        // Continue with local logout even if API call fails
+      }
+    }
+    
+    // Clear all authentication data
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('refreshToken');
+    localStorage.removeItem('tokenExpiry');
+    localStorage.removeItem('userInfo');
+    
+    // Reset application state
+    setIsAuthenticated(false);
+    setUserInfo(null);
+    setDocuments([]);
+    setSelectedDocument(null);
+    setOcrResult(null);
+    setDocumentPreview(null);
+    setActiveView('upload');
+    setIsLoggingOut(false);
+  };
+
+  // Helper to get authorization headers
+  const getAuthHeader = () => {
+    const token = localStorage.getItem('authToken');
+    console.log('Token retrieved:', token ? `${token.substring(0, 20)}...` : 'NO TOKEN');
+    if (!token) {
+      console.warn('⚠️ No auth token found in localStorage');
+    }
+    return token ? { 'Authorization': `Bearer ${token}` } : {};
+  };
+
+  // Fetch documents function
   const fetchDocuments = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}`);
+      const headers = getAuthHeader();
+      console.log('Fetching documents with headers:', headers);
+      const response = await fetch(`${API_BASE_URL}`, {
+        headers,
+      });
       const data = await response.json();
       if (data.success) {
         setDocuments(data.data);
@@ -66,16 +314,25 @@ const OcrApp = () => {
     }
   };
 
+  // Fetch documents on mount (only when authenticated)
   useEffect(() => {
-    fetchDocuments();
-  }, []);
+    if (isAuthenticated) {
+      fetchDocuments();
+    }
+  }, [isAuthenticated]);
 
+  // Auto-refresh documents
   useEffect(() => {
-    if (autoRefresh && activeView === 'documents') {
+    if (isAuthenticated && autoRefresh && activeView === 'documents') {
       const interval = setInterval(fetchDocuments, 5000);
       return () => clearInterval(interval);
     }
-  }, [autoRefresh, activeView]);
+  }, [isAuthenticated, autoRefresh, activeView]);
+
+  // Show login screen if not authenticated
+  if (!isAuthenticated) {
+    return <Login onLoginSuccess={handleLoginSuccess} />;
+  }
 
   const handleFileUpload = async (file, processImmediately = false) => {
     setUploading(true);
@@ -84,8 +341,11 @@ const OcrApp = () => {
 
     try {
       const endpoint = processImmediately ? '/upload-and-process' : '/upload';
+      const authHeaders = getAuthHeader();
+      console.log('Uploading file with auth headers:', authHeaders);
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',
+        headers: authHeaders,
         body: formData,
       });
       const data = await response.json();
@@ -110,6 +370,10 @@ const OcrApp = () => {
       if (btn) btn.disabled = true; // prevent double click
       const response = await fetch(`${API_BASE_URL}/${documentId}/process`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeader(),
+        },
       });
       const data = await response.json();
       if (data.success) {
@@ -132,14 +396,16 @@ const OcrApp = () => {
     setActiveView('preview');
 
     try {
-      const previewResponse = await fetch(`${API_BASE_URL}/${document.id}/preview`);
+      const headers = getAuthHeader();
+
+      const previewResponse = await fetch(`${API_BASE_URL}/${document.id}/preview`, { headers });
       const previewData = await previewResponse.json();
       if (previewData.success) {
         setDocumentPreview(previewData.data);
       }
 
       if (document.status === 'COMPLETED') {
-        const ocrResponse = await fetch(`${API_BASE_URL}/${document.id}/ocr`);
+        const ocrResponse = await fetch(`${API_BASE_URL}/${document.id}/ocr`, { headers });
         const ocrData = await ocrResponse.json();
         if (ocrData.success) {
           setOcrResult(ocrData.data);
@@ -158,6 +424,10 @@ const OcrApp = () => {
     try {
       const response = await fetch(`${API_BASE_URL}/${documentId}`, {
         method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeader(),
+        },
       });
       const data = await response.json();
       if (data.success) {
@@ -663,7 +933,9 @@ const OcrApp = () => {
   
     const fetchDocumentTypes = async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/document-types`);
+        const res = await fetch(`${API_BASE_URL}/document-types`, {
+          headers: getAuthHeader(),
+        });
         const data = await res.json();
   
         if (Array.isArray(data)) setDocumentTypes(data);
@@ -687,7 +959,10 @@ const OcrApp = () => {
       try {
         const res = await fetch(`${API_BASE_URL}/document-types`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            ...getAuthHeader(),
+          },
           body: JSON.stringify(newDocType),
         });
   
@@ -717,7 +992,10 @@ const OcrApp = () => {
         try {
           const res = await fetch(url, {
             method,
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+              'Content-Type': 'application/json',
+              ...getAuthHeader(),
+            },
             body: JSON.stringify(newField),
           });
       
@@ -859,7 +1137,13 @@ const OcrApp = () => {
                   try {
                     const res = await fetch(
                       `${API_BASE_URL}/document-types/fields/${f.id}`,
-                      { method: 'DELETE' }
+                      { 
+                        method: 'DELETE',
+                        headers: {
+                          'Content-Type': 'application/json',
+                          ...getAuthHeader(),
+                        },
+                      }
                     );
                     if (!res.ok) throw new Error('Failed to delete field');
                     alert('Field deleted');
@@ -1073,8 +1357,54 @@ const OcrApp = () => {
       )}
 
       {sidebarOpen && (
-        <div className="p-4 border-t border-gray-200 text-xs text-gray-500">
-          <p className="mt-1">v1.0.0</p>
+        <div className="p-4 border-t border-indigo-900">
+          {/* User Info */}
+          <div className="mb-3 p-3 bg-indigo-900 rounded-lg">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
+                <User size={18} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-white truncate">
+                  {userInfo?.fullName || userInfo?.firstName || userInfo?.email || 'User'}
+                </p>
+                {userInfo?.email && (
+                  <p className="text-xs text-gray-300 truncate">
+                    {userInfo.email}
+                  </p>
+                )}
+                {userInfo?.role && (
+                  <p className="text-xs text-blue-300 truncate">
+                    {userInfo.role}
+                  </p>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={handleLogout}
+              disabled={isLoggingOut}
+              className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                isLoggingOut 
+                  ? 'bg-gray-400 cursor-not-allowed' 
+                  : 'bg-red-600 hover:bg-red-700'
+              } text-white`}
+            >
+              {isLoggingOut ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                  <span>Logging out...</span>
+                </>
+              ) : (
+                <>
+                  <LogOut size={16} />
+                  <span>Logout</span>
+                </>
+              )}
+            </button>
+          </div>
+          
+          {/* Version */}
+          <p className="text-xs text-gray-400 text-center">v1.0.0</p>
         </div>
       )}
     </div>
@@ -1087,6 +1417,14 @@ const OcrApp = () => {
       {activeView === 'documentTypes' && <DocumentTypesView />}
       {activeView === 'qaReview' && <QaReviewView />}
     </div>
+
+    {/* Token Refresh Notification */}
+    {tokenRefreshNotification && (
+      <div className="fixed bottom-4 right-4 bg-blue-600 text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 z-50 animate-fade-in">
+        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+        <span className="text-sm font-medium">Refreshing session...</span>
+      </div>
+    )}
   </div>
 );
 
