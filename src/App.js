@@ -91,15 +91,21 @@ const OcrApp = () => {
     const checkAndRefreshToken = async () => {
       const tokenExpiry = localStorage.getItem('tokenExpiry');
       
-      if (!tokenExpiry) return;
+      if (!tokenExpiry) {
+        console.log('⚠️ No token expiry found');
+        return;
+      }
       
       const expiryTime = parseInt(tokenExpiry);
       const now = Date.now();
       const timeUntilExpiry = expiryTime - now;
+      const minutesUntilExpiry = Math.floor(timeUntilExpiry / 60000);
+      
+      console.log(`🕐 Token expires in ${minutesUntilExpiry} minutes (${Math.floor(timeUntilExpiry / 1000)} seconds)`);
       
       // If token has already expired
       if (timeUntilExpiry <= 0) {
-        console.log('Token has expired, attempting refresh...');
+        console.log('❌ Token has expired, attempting refresh...');
         const refreshed = await refreshAccessToken();
         
         if (!refreshed) {
@@ -107,14 +113,17 @@ const OcrApp = () => {
           handleLogout();
         }
       }
-      // If token will expire in less than 2 minutes (120 seconds), proactively refresh
-      else if (timeUntilExpiry < 120000) {
-        console.log('Token expiring soon, proactively refreshing...');
-        await refreshAccessToken();
+      // If token will expire in less than 5 minutes (300 seconds), proactively refresh
+      else if (timeUntilExpiry < 300000) {
+        console.log(`🔄 Token expiring in ${minutesUntilExpiry} minutes, proactively refreshing...`);
+        const refreshed = await refreshAccessToken();
+        if (!refreshed) {
+          console.warn('⚠️ Proactive token refresh failed, will retry next cycle');
+        }
       }
     };
 
-    // Check immediately
+    // Check immediately on mount
     checkAndRefreshToken();
     
     // Then check every minute
@@ -136,12 +145,12 @@ const OcrApp = () => {
     const refreshToken = localStorage.getItem('refreshToken');
     
     if (!refreshToken) {
-      console.log('No refresh token available');
+      console.error('❌ No refresh token available for token refresh');
       return false;
     }
 
     try {
-      console.log('Attempting to refresh access token...');
+      console.log('🔄 Attempting to refresh access token...');
       setTokenRefreshNotification(true);
       
       const response = await fetch('/auth/api/v1/auth/refresh', {
@@ -158,14 +167,17 @@ const OcrApp = () => {
         if (data.accessToken) {
           // Update tokens in localStorage
           localStorage.setItem('authToken', data.accessToken);
+          console.log('✅ New access token stored');
           
           if (data.refreshToken) {
             localStorage.setItem('refreshToken', data.refreshToken);
+            console.log('✅ New refresh token stored');
           }
           
           if (data.expiresIn) {
             const expiryTime = Date.now() + (data.expiresIn * 1000);
             localStorage.setItem('tokenExpiry', expiryTime.toString());
+            console.log(`✅ Token will expire in ${data.expiresIn} seconds (${Math.floor(data.expiresIn / 60)} minutes)`);
           }
           
           if (data.user) {
@@ -173,26 +185,29 @@ const OcrApp = () => {
             setUserInfo(data.user);
           }
           
-          console.log('Access token refreshed successfully');
+          console.log('✅ Access token refreshed successfully');
           
           // Hide notification after 2 seconds
           setTimeout(() => setTokenRefreshNotification(false), 2000);
           
           return true;
+        } else {
+          console.error('❌ Token refresh response missing accessToken');
+          setTokenRefreshNotification(false);
+          return false;
         }
       } else {
-        console.error('Token refresh failed:', response.status);
+        console.error(`❌ Token refresh failed with status: ${response.status}`);
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Error details:', errorData);
         setTokenRefreshNotification(false);
         return false;
       }
     } catch (error) {
-      console.error('Error refreshing token:', error);
+      console.error('❌ Error refreshing token:', error);
       setTokenRefreshNotification(false);
       return false;
     }
-    
-    setTokenRefreshNotification(false);
-    return false;
   };
 
   // Helper function for authenticated fetch with automatic token refresh and logout on 401
