@@ -5,6 +5,12 @@ import Login from "./Login";
 
 
 const API_BASE_URL = '/ocr/v1/documents';
+const TEMPLATES_API_URL = '/ocr/v1/prompt-templates';
+
+// Local development mode - disable authentication when running on localhost
+const IS_LOCAL_MODE = window.location.hostname === 'localhost' || 
+                      window.location.hostname === '127.0.0.1' ||
+                      window.location.hostname === '';
 
 // Helper function to convert array date to readable format
 const formatDateTime = (dateArray) => {
@@ -44,8 +50,12 @@ const base64ToBlob = (base64, mimeType) => {
 };
 
 const OcrApp = () => {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userInfo, setUserInfo] = useState(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(IS_LOCAL_MODE);
+  const [userInfo, setUserInfo] = useState(IS_LOCAL_MODE ? { 
+    fullName: 'Local User', 
+    email: 'local@dev.com',
+    role: 'DEVELOPER' 
+  } : null);
   const [activeView, setActiveView] = useState('upload');
   const [documents, setDocuments] = useState([]);
   const [selectedDocument, setSelectedDocument] = useState(null);
@@ -58,9 +68,17 @@ const OcrApp = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [tokenRefreshNotification, setTokenRefreshNotification] = useState(false);
+  const [reEnhancing, setReEnhancing] = useState(false);
 
   // Check for existing authentication on mount
   useEffect(() => {
+    // Skip authentication check if in local mode
+    if (IS_LOCAL_MODE) {
+      console.log('🔓 Local mode detected - authentication disabled');
+      setIsAuthenticated(true);
+      return;
+    }
+
     const token = localStorage.getItem('authToken');
     const tokenExpiry = localStorage.getItem('tokenExpiry');
     const savedUserInfo = localStorage.getItem('userInfo');
@@ -86,7 +104,7 @@ const OcrApp = () => {
 
   // Check token expiry and refresh proactively (every minute)
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || IS_LOCAL_MODE) return;
 
     const checkAndRefreshToken = async () => {
       const tokenExpiry = localStorage.getItem('tokenExpiry');
@@ -114,7 +132,7 @@ const OcrApp = () => {
         }
       }
       // If token will expire in less than 5 minutes (300 seconds), proactively refresh
-      else if (timeUntilExpiry < 300000) {
+      else if (timeUntilExpiry < 1800000) {
         console.log(`🔄 Token expiring in ${minutesUntilExpiry} minutes, proactively refreshing...`);
         const refreshed = await refreshAccessToken();
         if (!refreshed) {
@@ -266,6 +284,13 @@ const OcrApp = () => {
 
   // Logout handler
   const handleLogout = async () => {
+    // In local mode, just refresh the page
+    if (IS_LOCAL_MODE) {
+      console.log('🔓 Local mode - refreshing page instead of logout');
+      window.location.reload();
+      return;
+    }
+
     setIsLoggingOut(true);
     const token = localStorage.getItem('authToken');
     
@@ -401,6 +426,38 @@ const OcrApp = () => {
       alert('Error processing document: ' + error.message);
     } finally {
       if (e?.currentTarget) e.currentTarget.disabled = false;
+    }
+  };
+
+  const reEnhanceDocument = async (documentId, e) => {
+    e?.stopPropagation(); // Ensure card click never fires
+    if (!window.confirm('Are you sure you want to re-enhance this document?')) return;
+    
+    setReEnhancing(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/${documentId}/re-enhance`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeader(),
+        },
+      });
+      const data = await response.json();
+      if (data.success) {
+        alert('Re-enhancement started successfully!');
+        await fetchDocuments(); // refresh documents list
+        
+        // If we're in preview view, refresh the document details
+        if (selectedDocument && selectedDocument.id === documentId) {
+          await viewDocumentDetails(selectedDocument);
+        }
+      } else {
+        alert('Re-enhancement failed: ' + (data.message || 'Unknown error'));
+      }
+    } catch (error) {
+      alert('Error re-enhancing document: ' + error.message);
+    } finally {
+      setReEnhancing(false);
     }
   };
   
@@ -644,17 +701,39 @@ const OcrApp = () => {
 
   const PreviewView = () => (
     <div className="p-6">
-      <button
-        onClick={() => {
-          setActiveView('documents');
-          setSelectedDocument(null);
-          setOcrResult(null);
-          setDocumentPreview(null);
-        }}
-        className="mb-4 px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm"
-      >
-        ← Back to Documents
-      </button>
+      <div className="flex gap-2 mb-4">
+        <button
+          onClick={() => {
+            setActiveView('documents');
+            setSelectedDocument(null);
+            setOcrResult(null);
+            setDocumentPreview(null);
+          }}
+          className="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm"
+        >
+          ← Back to Documents
+        </button>
+        {selectedDocument && (
+          <button
+            onClick={(e) => reEnhanceDocument(selectedDocument.id, e)}
+            disabled={reEnhancing}
+            className={`px-4 py-2 rounded-lg text-sm flex items-center gap-2 ${
+              reEnhancing 
+                ? 'bg-purple-400 cursor-not-allowed' 
+                : 'bg-purple-600 hover:bg-purple-700'
+            } text-white`}
+          >
+            {reEnhancing ? (
+              <>
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                <span>Re-enhancing...</span>
+              </>
+            ) : (
+              'Re-enhance Document'
+            )}
+          </button>
+        )}
+      </div>
   
       {loading ? (
         <div className="flex justify-center items-center h-64">
@@ -816,13 +895,38 @@ const OcrApp = () => {
 
                         // Recursive function to render nested JSON nicely
                         const renderObject = (obj, level = 0) => {
-                            return Object.entries(obj).map(([key, value]) => {
+                            return Object.entries(obj).map(([key, value], index) => {
                             const formattedKey = key.replace(/_/g, ' ');
                             const padding = { paddingLeft: `${level * 16}px` };
 
-                            if (value && typeof value === 'object' && !Array.isArray(value)) {
+                            // Handle arrays
+                            if (Array.isArray(value)) {
                                 return (
-                                <div key={key} style={padding} className="mb-2">
+                                <div key={`${key}-${index}`} style={padding} className="mb-3">
+                                    <p className="font-medium text-indigo-900 capitalize mb-1">
+                                    {formattedKey} ({value.length})
+                                    </p>
+                                    <div className="ml-2 border-l-2 border-indigo-300 pl-3 space-y-2">
+                                    {value.map((item, idx) => (
+                                        <div key={idx} className="bg-indigo-100 rounded p-2">
+                                        <p className="text-xs font-semibold text-indigo-700 mb-1">
+                                            Item {idx + 1}
+                                        </p>
+                                        {typeof item === 'object' && item !== null ? (
+                                            renderObject(item, level + 1)
+                                        ) : (
+                                            <span className="text-indigo-800 text-sm">{String(item)}</span>
+                                        )}
+                                        </div>
+                                    ))}
+                                    </div>
+                                </div>
+                                );
+                            }
+                            // Handle nested objects
+                            else if (value && typeof value === 'object') {
+                                return (
+                                <div key={`${key}-${index}`} style={padding} className="mb-2">
                                     <p className="font-medium text-indigo-900 capitalize">
                                     {formattedKey}
                                     </p>
@@ -831,16 +935,18 @@ const OcrApp = () => {
                                     </div>
                                 </div>
                                 );
-                            } else {
+                            }
+                            // Handle primitive values
+                            else {
                                 return (
                                 <div
-                                    key={key}
+                                    key={`${key}-${index}`}
                                     style={padding}
                                     className="flex justify-between border-b border-indigo-100 py-1"
                                 >
                                     <span className="text-indigo-900 capitalize">{formattedKey}</span>
                                     <span className="text-indigo-800 text-right break-all">
-                                    {String(value)}
+                                    {value === null ? 'null' : String(value)}
                                     </span>
                                 </div>
                                 );
@@ -925,68 +1031,89 @@ const OcrApp = () => {
   );
 
   const DocumentTypesView = () => {
-    const [documentTypes, setDocumentTypes] = useState([]);
+    const [templates, setTemplates] = useState([]);
     const [showAddForm, setShowAddForm] = useState(false);
-    const [newDocType, setNewDocType] = useState({
+    const [editingTemplate, setEditingTemplate] = useState(null);
+    const [newTemplate, setNewTemplate] = useState({
       code: '',
       name: '',
       description: '',
-      example: '',
+      systemInstructions: '',
+      specificInstructions: '',
+      expectedFields: '',
+      exampleOutput: '',
+      isActive: true,
     });
     const [loading, setLoading] = useState(false);
+    const [showViewModal, setShowViewModal] = useState(false);
+    const [selectedTemplate, setSelectedTemplate] = useState(null);
+    const [activeOnlyFilter, setActiveOnlyFilter] = useState(false);
   
-    // For "Add Field" modal
-    const [selectedDocType, setSelectedDocType] = useState(null);
-    const [showAddFieldModal, setShowAddFieldModal] = useState(false);
-    const [newField, setNewField] = useState({
-      name: '',
-      displayName: '',
-      dataType: 'string',
-      required: false,
-      orderIndex: 0,
-    });
-  
-    const fetchDocumentTypes = async () => {
+    const fetchTemplates = async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/document-types`, {
+        const url = `${TEMPLATES_API_URL}${activeOnlyFilter ? '?activeOnly=true' : ''}`;
+        const res = await fetch(url, {
           headers: getAuthHeader(),
         });
         const data = await res.json();
   
-        if (Array.isArray(data)) setDocumentTypes(data);
-        else if (Array.isArray(data.content)) setDocumentTypes(data.content);
-        else if (Array.isArray(data.data)) setDocumentTypes(data.data);
-        else setDocumentTypes([]);
+        if (data.success && Array.isArray(data.data)) {
+          setTemplates(data.data);
+        } else if (Array.isArray(data)) {
+          setTemplates(data);
+        } else {
+          setTemplates([]);
+        }
       } catch (err) {
-        console.error('Error fetching document types:', err);
-        setDocumentTypes([]);
+        console.error('Error fetching templates:', err);
+        setTemplates([]);
       }
     };
   
     useEffect(() => {
-      fetchDocumentTypes();
-    }, []);
+      fetchTemplates();
+    }, [activeOnlyFilter]);
   
-    const handleAddDocumentType = async (e) => {
+    const handleSubmitTemplate = async (e) => {
       e.preventDefault();
       setLoading(true);
   
       try {
-        const res = await fetch(`${API_BASE_URL}/document-types`, {
-          method: 'POST',
+        const isEdit = !!editingTemplate;
+        const url = isEdit 
+          ? `${TEMPLATES_API_URL}/${editingTemplate.id}`
+          : TEMPLATES_API_URL;
+        const method = isEdit ? 'PUT' : 'POST';
+  
+        const res = await fetch(url, {
+          method,
           headers: { 
             'Content-Type': 'application/json',
             ...getAuthHeader(),
           },
-          body: JSON.stringify(newDocType),
+          body: JSON.stringify(newTemplate),
         });
   
-        if (!res.ok) throw new Error('Failed to add document type');
+        const data = await res.json();
+        
+        if (!res.ok) {
+          throw new Error(data.message || `Failed to ${isEdit ? 'update' : 'add'} template`);
+        }
   
-        setNewDocType({ code: '', name: '', description: '', example: '' });
+        setNewTemplate({
+          code: '',
+          name: '',
+          description: '',
+          systemInstructions: '',
+          specificInstructions: '',
+          expectedFields: '',
+          exampleOutput: '',
+          isActive: true,
+        });
+        setEditingTemplate(null);
         setShowAddForm(false);
-        fetchDocumentTypes();
-        alert('Document type added successfully!');
+        fetchTemplates();
+        alert(`Template ${isEdit ? 'updated' : 'added'} successfully!`);
       } catch (err) {
         alert(err.message);
       } finally {
@@ -994,272 +1121,531 @@ const OcrApp = () => {
       }
     };
   
-    const handleAddField = async (e) => {
-        e.preventDefault();
-        if (!selectedDocType) return;
-      
-        const isEdit = !!newField.id;
-        const url = isEdit
-          ? `${API_BASE_URL}/document-types/fields/${newField.id}`
-          : `${API_BASE_URL}/document-types/${selectedDocType.id}/fields`;
-        const method = isEdit ? 'PUT' : 'POST';
-      
-        try {
-          const res = await fetch(url, {
-            method,
-            headers: { 
-              'Content-Type': 'application/json',
-              ...getAuthHeader(),
-            },
-            body: JSON.stringify(newField),
-          });
-      
-          if (!res.ok) throw new Error(isEdit ? 'Failed to update field' : 'Failed to add field');
-      
-          alert(isEdit ? 'Field updated successfully!' : 'Field added successfully!');
-          setShowAddFieldModal(false);
-          setNewField({ name: '', displayName: '', dataType: 'string', required: false, orderIndex: 0 });
-          fetchDocumentTypes();
-        } catch (err) {
-          alert(err.message);
+    const handleEdit = (template) => {
+      setEditingTemplate(template);
+      setNewTemplate({
+        code: template.code || '',
+        name: template.name || '',
+        description: template.description || '',
+        systemInstructions: template.systemInstructions || '',
+        specificInstructions: template.specificInstructions || '',
+        expectedFields: template.expectedFields || '',
+        exampleOutput: template.exampleOutput || '',
+        isActive: template.isActive !== undefined ? template.isActive : true,
+      });
+      setShowAddForm(true);
+    };
+  
+    const handleDelete = async (template) => {
+      if (!window.confirm(`Are you sure you want to delete template "${template.name}"?`)) {
+        return;
+      }
+  
+      try {
+        const res = await fetch(`${TEMPLATES_API_URL}/${template.id}`, {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeader(),
+          },
+        });
+  
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.message || 'Failed to delete template');
         }
-      };
-      
+  
+        alert('Template deleted successfully!');
+        fetchTemplates();
+      } catch (err) {
+        alert(err.message);
+      }
+    };
+  
+    const handleToggleActive = async (template) => {
+      try {
+        const action = template.isActive ? 'deactivate' : 'activate';
+        const res = await fetch(`${TEMPLATES_API_URL}/code/${template.code}/${action}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeader(),
+          },
+        });
+  
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.message || `Failed to ${action} template`);
+        }
+  
+        alert(`Template ${action}d successfully!`);
+        fetchTemplates();
+      } catch (err) {
+        alert(err.message);
+      }
+    };
+  
+    const handleViewDetails = (template) => {
+      setSelectedTemplate(template);
+      setShowViewModal(true);
+    };
+  
+    const handleRefreshCache = async () => {
+      try {
+        const res = await fetch(`${TEMPLATES_API_URL}/refresh-cache`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeader(),
+          },
+        });
+  
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.message || 'Failed to refresh cache');
+        }
+  
+        alert('Template cache refreshed successfully!');
+      } catch (err) {
+        alert(err.message);
+      }
+    };
+  
+    const parseExpectedFields = (fieldsJson) => {
+      try {
+        if (!fieldsJson) return [];
+        const parsed = JSON.parse(fieldsJson);
+        return Object.entries(parsed).map(([key, value]) => ({
+          name: key,
+          type: typeof value === 'string' ? value : JSON.stringify(value),
+        }));
+      } catch (e) {
+        return [];
+      }
+    };
   
     return (
       <div className="p-6 relative">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-bold">Document Types</h2>
-          <button
-            onClick={() => setShowAddForm(!showAddForm)}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-          >
-            {showAddForm ? 'Cancel' : 'Add Document Type'}
-          </button>
+          <div>
+            <h2 className="text-2xl font-bold">Document Type Templates</h2>
+            <p className="text-sm text-gray-600 mt-1">
+              Manage dynamic prompt templates for OCR document processing
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setActiveOnlyFilter(!activeOnlyFilter)}
+              className={`px-4 py-2 rounded-lg text-sm transition-colors ${
+                activeOnlyFilter 
+                  ? 'bg-green-100 text-green-700 hover:bg-green-200' 
+                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+              }`}
+            >
+              {activeOnlyFilter ? 'Show All' : 'Active Only'}
+            </button>
+            <button
+              onClick={handleRefreshCache}
+              className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm"
+            >
+              Refresh Cache
+            </button>
+            <button
+              onClick={() => {
+                setShowAddForm(!showAddForm);
+                if (showAddForm) {
+                  setEditingTemplate(null);
+                  setNewTemplate({
+                    code: '',
+                    name: '',
+                    description: '',
+                    systemInstructions: '',
+                    specificInstructions: '',
+                    expectedFields: '',
+                    exampleOutput: '',
+                    isActive: true,
+                  });
+                }
+              }}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            >
+              {showAddForm ? 'Cancel' : '+ Add Template'}
+            </button>
+          </div>
         </div>
   
-        {/* --- Add New Document Type Form --- */}
+        {/* Add/Edit Template Form */}
         {showAddForm && (
           <form
-            onSubmit={handleAddDocumentType}
-            className="bg-white border border-gray-200 rounded-lg p-6 mb-6"
+            onSubmit={handleSubmitTemplate}
+            className="bg-white border border-gray-200 rounded-lg p-6 mb-6 shadow-sm"
           >
+            <h3 className="text-lg font-semibold mb-4">
+              {editingTemplate ? 'Edit Template' : 'Add New Template'}
+            </h3>
+            
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium mb-1">Code</label>
+                <label className="block text-sm font-medium mb-1">
+                  Code <span className="text-red-500">*</span>
+                </label>
                 <input
                   type="text"
-                  value={newDocType.code}
-                  onChange={(e) => setNewDocType({ ...newDocType, code: e.target.value })}
+                  value={newTemplate.code}
+                  onChange={(e) => setNewTemplate({ ...newTemplate, code: e.target.value })}
                   className="w-full border rounded px-3 py-2"
+                  placeholder="e.g., medical_prescription"
                   required
+                  disabled={!!editingTemplate}
                 />
+                <p className="text-xs text-gray-500 mt-1">Unique identifier (lowercase, underscores)</p>
               </div>
+              
               <div>
-                <label className="block text-sm font-medium mb-1">Name</label>
+                <label className="block text-sm font-medium mb-1">
+                  Name <span className="text-red-500">*</span>
+                </label>
                 <input
                   type="text"
-                  value={newDocType.name}
-                  onChange={(e) => setNewDocType({ ...newDocType, name: e.target.value })}
+                  value={newTemplate.name}
+                  onChange={(e) => setNewTemplate({ ...newTemplate, name: e.target.value })}
                   className="w-full border rounded px-3 py-2"
+                  placeholder="e.g., Medical Prescription"
                   required
                 />
               </div>
+              
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium mb-1">Description</label>
                 <textarea
-                  value={newDocType.description}
-                  onChange={(e) => setNewDocType({ ...newDocType, description: e.target.value })}
+                  value={newTemplate.description}
+                  onChange={(e) => setNewTemplate({ ...newTemplate, description: e.target.value })}
                   className="w-full border rounded px-3 py-2"
+                  placeholder="Describe the document type..."
+                  rows={2}
                 />
               </div>
+              
               <div className="md:col-span-2">
-                <label className="block text-sm font-medium mb-1">Example JSON</label>
+                <label className="block text-sm font-medium mb-1">
+                  System Instructions <span className="text-red-500">*</span>
+                </label>
                 <textarea
-                  value={newDocType.example}
-                  onChange={(e) => setNewDocType({ ...newDocType, example: e.target.value })}
+                  value={newTemplate.systemInstructions}
+                  onChange={(e) => setNewTemplate({ ...newTemplate, systemInstructions: e.target.value })}
                   className="w-full border rounded px-3 py-2 font-mono text-sm"
+                  placeholder="You are an expert in..."
                   rows={3}
+                  required
                 />
+                <p className="text-xs text-gray-500 mt-1">Define the AI's role and expertise</p>
+              </div>
+              
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-1">
+                  Specific Instructions <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  value={newTemplate.specificInstructions}
+                  onChange={(e) => setNewTemplate({ ...newTemplate, specificInstructions: e.target.value })}
+                  className="w-full border rounded px-3 py-2 font-mono text-sm"
+                  placeholder="1. Extract field A&#10;2. Normalize dates to YYYY-MM-DD&#10;3. Handle missing values..."
+                  rows={4}
+                  required
+                />
+                <p className="text-xs text-gray-500 mt-1">Step-by-step extraction guidelines</p>
+              </div>
+              
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-1">
+                  Expected Fields (JSON Schema) <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  value={newTemplate.expectedFields}
+                  onChange={(e) => setNewTemplate({ ...newTemplate, expectedFields: e.target.value })}
+                  className="w-full border rounded px-3 py-2 font-mono text-sm"
+                  placeholder='{\n  "field_name": "string",\n  "date": "YYYY-MM-DD",\n  "amount": "number"\n}'
+                  rows={5}
+                  required
+                />
+                <p className="text-xs text-gray-500 mt-1">Valid JSON format with field types</p>
+              </div>
+              
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-1">
+                  Example Output (JSON) <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  value={newTemplate.exampleOutput}
+                  onChange={(e) => setNewTemplate({ ...newTemplate, exampleOutput: e.target.value })}
+                  className="w-full border rounded px-3 py-2 font-mono text-sm"
+                  placeholder='{\n  "field_name": "Example Value",\n  "date": "2024-03-15",\n  "amount": 100.50\n}'
+                  rows={5}
+                  required
+                />
+                <p className="text-xs text-gray-500 mt-1">Example JSON output for reference</p>
+              </div>
+              
+              <div className="md:col-span-2 flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="isActive"
+                  checked={newTemplate.isActive}
+                  onChange={(e) => setNewTemplate({ ...newTemplate, isActive: e.target.checked })}
+                  className="w-4 h-4"
+                />
+                <label htmlFor="isActive" className="text-sm font-medium">
+                  Active (Template will be available for use)
+                </label>
               </div>
             </div>
-            <div className="mt-4">
+            
+            <div className="mt-6 flex gap-2">
               <button
                 type="submit"
                 disabled={loading}
-                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
               >
-                {loading ? 'Saving...' : 'Save Document Type'}
+                {loading ? 'Saving...' : editingTemplate ? 'Update Template' : 'Create Template'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddForm(false);
+                  setEditingTemplate(null);
+                  setNewTemplate({
+                    code: '',
+                    name: '',
+                    description: '',
+                    systemInstructions: '',
+                    specificInstructions: '',
+                    expectedFields: '',
+                    exampleOutput: '',
+                    isActive: true,
+                  });
+                }}
+                className="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
+              >
+                Cancel
               </button>
             </div>
           </form>
         )}
   
-        {/* --- List of Document Types --- */}
+        {/* Templates List */}
         <div className="grid gap-4">
-          {Array.isArray(documentTypes) && documentTypes.length > 0 ? (
-            documentTypes.map((dt) => (
+          {Array.isArray(templates) && templates.length > 0 ? (
+            templates.map((template) => (
               <div
-                key={dt.id || dt.code}
-                className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition"
+                key={template.id || template.code}
+                className={`bg-white border rounded-lg p-4 hover:shadow-md transition ${
+                  !template.isActive ? 'border-gray-300 bg-gray-50' : 'border-gray-200'
+                }`}
               >
                 <div className="flex justify-between items-start">
-                  <div>
-                    <h3 className="font-semibold text-lg text-blue-800">{dt.name}</h3>
-                    <p className="text-sm text-gray-500 mb-2">{dt.description}</p>
-                    <p className="text-xs text-gray-400">Code: {dt.code}</p>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-3 mb-2">
+                      <h3 className="font-semibold text-lg text-blue-800">{template.name}</h3>
+                      <span
+                        className={`px-2 py-1 rounded-full text-xs font-medium ${
+                          template.isActive
+                            ? 'bg-green-100 text-green-800'
+                            : 'bg-gray-200 text-gray-600'
+                        }`}
+                      >
+                        {template.isActive ? 'Active' : 'Inactive'}
+                      </span>
+                    </div>
+                    <p className="text-sm text-gray-600 mb-2">{template.description}</p>
+                    <div className="flex items-center gap-4 text-xs text-gray-500">
+                      <span className="font-mono bg-gray-100 px-2 py-1 rounded">
+                        {template.code}
+                      </span>
+                      {template.createdAt && (
+                        <span>Created: {formatDateTime(template.createdAt)}</span>
+                      )}
+                      {template.updatedAt && (
+                        <span>Updated: {formatDateTime(template.updatedAt)}</span>
+                      )}
+                    </div>
+                    
+                    {/* Expected Fields Preview */}
+                    {template.expectedFields && (
+                      <div className="mt-3">
+                        <h4 className="text-xs font-semibold text-gray-700 mb-1">Expected Fields:</h4>
+                        <div className="flex flex-wrap gap-1">
+                          {parseExpectedFields(template.expectedFields).slice(0, 5).map((field, idx) => (
+                            <span
+                              key={idx}
+                              className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-200"
+                            >
+                              {field.name}: {field.type}
+                            </span>
+                          ))}
+                          {parseExpectedFields(template.expectedFields).length > 5 && (
+                            <span className="text-xs text-gray-500">
+                              +{parseExpectedFields(template.expectedFields).length - 5} more
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <div className="flex gap-2">
+                  
+                  <div className="flex flex-col gap-2 ml-4">
                     <button
-                      onClick={() => {
-                        setSelectedDocType(dt);
-                        setShowAddFieldModal(true);
-                      }}
-                      className="px-3 py-1 bg-green-100 text-green-700 rounded text-sm hover:bg-green-200"
+                      onClick={() => handleViewDetails(template)}
+                      className="px-3 py-1 bg-indigo-100 text-indigo-700 rounded text-sm hover:bg-indigo-200 flex items-center gap-1"
                     >
-                      + Add Fields
+                      <Eye size={14} />
+                      View
+                    </button>
+                    <button
+                      onClick={() => handleEdit(template)}
+                      className="px-3 py-1 bg-yellow-100 text-yellow-800 rounded text-sm hover:bg-yellow-200"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => handleToggleActive(template)}
+                      className={`px-3 py-1 rounded text-sm ${
+                        template.isActive
+                          ? 'bg-orange-100 text-orange-700 hover:bg-orange-200'
+                          : 'bg-green-100 text-green-700 hover:bg-green-200'
+                      }`}
+                    >
+                      {template.isActive ? 'Deactivate' : 'Activate'}
+                    </button>
+                    <button
+                      onClick={() => handleDelete(template)}
+                      className="px-3 py-1 bg-red-100 text-red-700 rounded text-sm hover:bg-red-200 flex items-center gap-1"
+                    >
+                      <Trash2 size={14} />
+                      Delete
                     </button>
                   </div>
                 </div>
-  
-                {Array.isArray(dt.fields) && dt.fields.length > 0 && (
-  <div className="mt-3">
-    <h4 className="text-sm font-medium mb-1 text-gray-700">Fields</h4>
-    <ul className="text-sm text-gray-600 list-disc list-inside">
-      {dt.fields.map((f) => (
-        <li
-          key={f.id || f.name}
-          className="flex justify-between items-center py-1 border-b border-gray-100"
-        >
-          <div>
-            <span className="font-medium">{f.name}</span> — <span>{f.dataType}</span>
-            {f.required && <span className="ml-2 text-xs text-red-600">(required)</span>}
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                setSelectedDocType(dt);
-                setNewField(f);
-                setShowAddFieldModal(true);
-              }}
-              className="px-2 py-1 text-xs bg-yellow-100 text-yellow-800 rounded hover:bg-yellow-200"
-            >
-              Edit
-            </button>
-            <button
-              onClick={async () => {
-                if (window.confirm(`Delete field "${f.name}"?`)) {
-                  try {
-                    const res = await fetch(
-                      `${API_BASE_URL}/document-types/fields/${f.id}`,
-                      { 
-                        method: 'DELETE',
-                        headers: {
-                          'Content-Type': 'application/json',
-                          ...getAuthHeader(),
-                        },
-                      }
-                    );
-                    if (!res.ok) throw new Error('Failed to delete field');
-                    alert('Field deleted');
-                    fetchDocumentTypes();
-                  } catch (err) {
-                    alert(err.message);
-                  }
-                }
-              }}
-              className="px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200"
-            >
-              Delete
-            </button>
-          </div>
-        </li>
-      ))}
-    </ul>
-  </div>
-)}
-
               </div>
             ))
           ) : (
-            <p className="text-gray-500 text-sm">No document types found.</p>
+            <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
+              <FileText className="mx-auto mb-4 text-gray-300" size={64} />
+              <p className="text-gray-500">No templates found.</p>
+              <button
+                onClick={() => setShowAddForm(true)}
+                className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              >
+                Create First Template
+              </button>
+            </div>
           )}
         </div>
   
-        {/* --- Add Field Modal --- */}
-        {showAddFieldModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
-            <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-md relative">
-              <button
-                onClick={() => setShowAddFieldModal(false)}
-                className="absolute top-3 right-3 text-gray-500 hover:text-gray-800"
-              >
-                ✕
-              </button>
-              <h3 className="text-lg font-semibold mb-4">
-                {newField.id ? 'Edit Field' : 'Add Field'} — {selectedDocType?.name}
-            </h3>
-  
-              <form onSubmit={handleAddField} className="space-y-3">
-                <div>
-                  <label className="block text-sm font-medium">Field Name</label>
-                  <input
-                    type="text"
-                    value={newField.name}
-                    onChange={(e) => setNewField({ ...newField, name: e.target.value })}
-                    className="w-full border rounded px-3 py-2"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium">Display Name</label>
-                  <input
-                    type="text"
-                    value={newField.displayName}
-                    onChange={(e) => setNewField({ ...newField, displayName: e.target.value })}
-                    className="w-full border rounded px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium">Data Type</label>
-                  <select
-                    value={newField.dataType}
-                    onChange={(e) => setNewField({ ...newField, dataType: e.target.value })}
-                    className="w-full border rounded px-3 py-2"
-                  >
-                    <option value="string">String</option>
-                    <option value="number">Number</option>
-                    <option value="date">Date</option>
-                    <option value="boolean">Boolean</option>
-                  </select>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={newField.required}
-                    onChange={(e) => setNewField({ ...newField, required: e.target.checked })}
-                  />
-                  <label>Required</label>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium">Order Index</label>
-                  <input
-                    type="number"
-                    value={newField.orderIndex}
-                    onChange={(e) =>
-                      setNewField({ ...newField, orderIndex: parseInt(e.target.value) })
-                    }
-                    className="w-full border rounded px-3 py-2"
-                  />
-                </div>
-  
+        {/* View Template Details Modal */}
+        {showViewModal && selectedTemplate && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50 p-4">
+            <div className="bg-white rounded-lg shadow-lg w-full max-w-4xl max-h-[90vh] overflow-auto relative">
+              <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex justify-between items-center">
+                <h3 className="text-xl font-semibold">{selectedTemplate.name}</h3>
                 <button
-                  type="submit"
-                  className="mt-3 w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700"
+                  onClick={() => setShowViewModal(false)}
+                  className="text-gray-500 hover:text-gray-800 text-2xl"
                 >
-                  Save Field
+                  ✕
                 </button>
-              </form>
+              </div>
+              
+              <div className="p-6 space-y-4">
+                <div>
+                  <h4 className="font-semibold text-sm text-gray-700 mb-1">Code:</h4>
+                  <p className="font-mono bg-gray-100 px-3 py-2 rounded text-sm">{selectedTemplate.code}</p>
+                </div>
+                
+                {selectedTemplate.description && (
+                  <div>
+                    <h4 className="font-semibold text-sm text-gray-700 mb-1">Description:</h4>
+                    <p className="text-sm text-gray-600">{selectedTemplate.description}</p>
+                  </div>
+                )}
+                
+                <div>
+                  <h4 className="font-semibold text-sm text-gray-700 mb-1">Status:</h4>
+                  <span
+                    className={`inline-block px-3 py-1 rounded-full text-xs font-medium ${
+                      selectedTemplate.isActive
+                        ? 'bg-green-100 text-green-800'
+                        : 'bg-gray-200 text-gray-600'
+                    }`}
+                  >
+                    {selectedTemplate.isActive ? 'Active' : 'Inactive'}
+                  </span>
+                </div>
+                
+                <div>
+                  <h4 className="font-semibold text-sm text-gray-700 mb-1">System Instructions:</h4>
+                  <div className="bg-blue-50 border border-blue-200 rounded p-3">
+                    <pre className="whitespace-pre-wrap text-sm font-mono text-gray-800">
+                      {selectedTemplate.systemInstructions}
+                    </pre>
+                  </div>
+                </div>
+                
+                <div>
+                  <h4 className="font-semibold text-sm text-gray-700 mb-1">Specific Instructions:</h4>
+                  <div className="bg-green-50 border border-green-200 rounded p-3">
+                    <pre className="whitespace-pre-wrap text-sm font-mono text-gray-800">
+                      {selectedTemplate.specificInstructions}
+                    </pre>
+                  </div>
+                </div>
+                
+                <div>
+                  <h4 className="font-semibold text-sm text-gray-700 mb-1">Expected Fields (JSON Schema):</h4>
+                  <div className="bg-purple-50 border border-purple-200 rounded p-3">
+                    <pre className="whitespace-pre-wrap text-sm font-mono text-gray-800">
+                      {selectedTemplate.expectedFields}
+                    </pre>
+                  </div>
+                </div>
+                
+                <div>
+                  <h4 className="font-semibold text-sm text-gray-700 mb-1">Example Output:</h4>
+                  <div className="bg-yellow-50 border border-yellow-200 rounded p-3">
+                    <pre className="whitespace-pre-wrap text-sm font-mono text-gray-800">
+                      {selectedTemplate.exampleOutput}
+                    </pre>
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4 pt-4 border-t">
+                  <div>
+                    <h4 className="font-semibold text-xs text-gray-600 mb-1">Created:</h4>
+                    <p className="text-sm">{formatDateTime(selectedTemplate.createdAt)}</p>
+                  </div>
+                  <div>
+                    <h4 className="font-semibold text-xs text-gray-600 mb-1">Updated:</h4>
+                    <p className="text-sm">{formatDateTime(selectedTemplate.updatedAt)}</p>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="sticky bottom-0 bg-gray-50 border-t border-gray-200 p-4 flex justify-end gap-2">
+                <button
+                  onClick={() => {
+                    setShowViewModal(false);
+                    handleEdit(selectedTemplate);
+                  }}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  Edit Template
+                </button>
+                <button
+                  onClick={() => setShowViewModal(false)}
+                  className="px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400"
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1351,8 +1737,8 @@ const OcrApp = () => {
                 : 'text-gray-200 hover:bg-indigo-800'
             }`}
             >
-            <List size={20} />
-            {sidebarOpen && <span>Document Types</span>}
+            <FileText size={20} />
+            {sidebarOpen && <span>Template Manager</span>}
         </button>
 
         <button
@@ -1401,13 +1787,20 @@ const OcrApp = () => {
               className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
                 isLoggingOut 
                   ? 'bg-gray-400 cursor-not-allowed' 
-                  : 'bg-red-600 hover:bg-red-700'
+                  : IS_LOCAL_MODE 
+                    ? 'bg-blue-600 hover:bg-blue-700' 
+                    : 'bg-red-600 hover:bg-red-700'
               } text-white`}
             >
               {isLoggingOut ? (
                 <>
                   <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
                   <span>Logging out...</span>
+                </>
+              ) : IS_LOCAL_MODE ? (
+                <>
+                  <Clock size={16} />
+                  <span>Refresh</span>
                 </>
               ) : (
                 <>
@@ -1426,6 +1819,18 @@ const OcrApp = () => {
 
     {/* Main Content Area */}
     <div className="flex-1 overflow-auto transition-all duration-300 ease-in-out">
+      {/* Local Mode Banner */}
+      {IS_LOCAL_MODE && (
+        <div className="bg-yellow-100 border-b-2 border-yellow-400 px-4 py-2">
+          <div className="flex items-center justify-center gap-2 text-yellow-800">
+            <AlertCircle size={18} />
+            <span className="font-medium text-sm">
+              🔓 Local Development Mode - Authentication Disabled
+            </span>
+          </div>
+        </div>
+      )}
+      
       {activeView === 'upload' && <UploadView />}
       {activeView === 'documents' && <DocumentsView />}
       {activeView === 'preview' && <PreviewView />}
