@@ -102,11 +102,19 @@ const OcrApp = () => {
     }
   }, []);
 
-  // Check token expiry and refresh proactively (every minute)
+  // Check token expiry and refresh proactively (every 5 minutes)
   useEffect(() => {
     if (!isAuthenticated || IS_LOCAL_MODE) return;
 
+    let refreshInProgress = false;
+
     const checkAndRefreshToken = async () => {
+      // Prevent multiple simultaneous refresh attempts
+      if (refreshInProgress) {
+        console.log('🔄 Token refresh already in progress, skipping...');
+        return;
+      }
+
       const tokenExpiry = localStorage.getItem('tokenExpiry');
       
       if (!tokenExpiry) {
@@ -124,17 +132,21 @@ const OcrApp = () => {
       // If token has already expired
       if (timeUntilExpiry <= 0) {
         console.log('❌ Token has expired, attempting refresh...');
+        refreshInProgress = true;
         const refreshed = await refreshAccessToken();
+        refreshInProgress = false;
         
         if (!refreshed) {
           alert('Your session has expired. Please login again.');
           handleLogout();
         }
       }
-      // If token will expire in less than 5 minutes (300 seconds), proactively refresh
-      else if (timeUntilExpiry < 1800000) {
+      // If token will expire in less than 10 minutes, proactively refresh
+      else if (timeUntilExpiry < 600000) { // 10 minutes = 600000ms
         console.log(`🔄 Token expiring in ${minutesUntilExpiry} minutes, proactively refreshing...`);
+        refreshInProgress = true;
         const refreshed = await refreshAccessToken();
+        refreshInProgress = false;
         if (!refreshed) {
           console.warn('⚠️ Proactive token refresh failed, will retry next cycle');
         }
@@ -144,8 +156,8 @@ const OcrApp = () => {
     // Check immediately on mount
     checkAndRefreshToken();
     
-    // Then check every minute
-    const interval = setInterval(checkAndRefreshToken, 60000);
+    // Then check every 5 minutes (300000ms) instead of every minute
+    const interval = setInterval(checkAndRefreshToken, 300000);
     return () => clearInterval(interval);
   }, [isAuthenticated]);
 
@@ -158,13 +170,20 @@ const OcrApp = () => {
     };
   };
 
-  // Token refresh function
+  // Token refresh function with cooldown
   const refreshAccessToken = async () => {
     const refreshToken = localStorage.getItem('refreshToken');
     
     if (!refreshToken) {
       console.error('❌ No refresh token available for token refresh');
       return false;
+    }
+
+    // Check if we recently refreshed (within last 2 minutes)
+    const lastRefresh = localStorage.getItem('lastTokenRefresh');
+    if (lastRefresh && Date.now() - parseInt(lastRefresh) < 120000) {
+      console.log('🔄 Token refresh skipped - recently refreshed');
+      return true;
     }
 
     try {
@@ -204,6 +223,9 @@ const OcrApp = () => {
           }
           
           console.log('✅ Access token refreshed successfully');
+          
+          // Record the last refresh time
+          localStorage.setItem('lastTokenRefresh', Date.now().toString());
           
           // Hide notification after 2 seconds
           setTimeout(() => setTokenRefreshNotification(false), 2000);
